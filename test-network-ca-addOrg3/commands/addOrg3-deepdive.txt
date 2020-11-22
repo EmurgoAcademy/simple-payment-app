@@ -1,0 +1,128 @@
+Deep Dive
+Instructions: 
+1.	Make sure you watch over the logs to check what is happening with various docker instances when the commands are executed
+2.	Try and connect to the theory we discussed in the initial days
+3.	Always refer to the network.sh and the corresponding shell scripts to understand from the comments what is happening
+4.	To watch for logs in the console, make changes to attach the docker logs to console
+
+
+In the test network folder do the following:
+
+################################# Generate Certificates and System Channel ###############################################
+
+./network.sh up -s couchdb -ca
+
+############################################ Create Channel #####################################################
+
+./network.sh createChannel
+
+############################################ Add Axis Bank #####################################################
+
+1. Up the axis bank ca
+
+	export PATH=${PWD}/../bin:${PWD}:$PATH
+
+	cd addOrg3
+
+	IMAGE_TAG=latest docker-compose -f docker/docker-compose-ca-org3.yaml up -d
+
+	docker ps
+
+2. Generate Axis Certificates
+	../scripts/org3-scripts/generateAxisCerts.sh
+
+3. Generate Axis Bank definition
+	export FABRIC_CFG_PATH=$PWD
+	configtxgen -printOrg AXISMSP > ../organizations/peerOrganizations/axis.example.com/org3.json
+
+4. Bring up the peer and its couchdb instances
+
+	IMAGE_TAG=latest docker-compose -f docker/docker-compose-org3.yaml -f docker/docker-compose-couch-org3.yaml up -d
+
+5. Log into the org3 cli 
+
+	docker exec -it Org3cli bash
+
+6. Set the Org1 context
+
+	export CORE_PEER_LOCALMSPID=HDFCMSP
+	export CORE_PEER_TLS_ENABLED=true
+	export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/hdfc.example.com/users/Admin@hdfc.example.com/msp
+	export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/hdfc.example.com/peers/peer0.hdfc.example.com/tls/ca.crt
+	export CORE_PEER_ADDRESS=localhost:7051
+	export ORDERER_CA=${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+	export CHANNEL_NAME=mychannel
+	
+
+6. Get the latest config block
+	peer channel fetch config config_block.pb -o orderer.example.com:7050 -c $CHANNEL_NAME --tls --cafile $ORDERER_CA
+
+7. Check the block
+	ls
+
+8. Decode the block to readable json format (For seeing the content only)
+	configtxlator proto_decode --input config_block.pb --type common.Block --output ./test.json
+
+9. Docode and trim
+
+	configtxlator proto_decode --input config_block.pb --type common.Block | jq .data.data[0].payload.data.config > config.json
+
+10. Add the Org3 crypto material
+
+	jq -s '.[0] * {"channel_group":{"groups":{"Application":{"groups": {"AXISMSP":.[1]}}}}}' config.json ./organizations/peerOrganizations/axis.example.com/org3.json > modified_config.json
+
+	configtxlator proto_encode --input config.json --type common.Config --output config.pb
+
+	configtxlator proto_encode --input modified_config.json --type common.Config --output modified_config.pb
+
+11. Calculate delta
+
+	configtxlator compute_update --channel_id $CHANNEL_NAME --original config.pb --updated modified_config.pb --output org3_update.pb
+
+12. Convert to json for delta
+	configtxlator proto_decode --input org3_update.pb --type common.ConfigUpdate | jq . > org3_update.json
+
+13. Add the envelop
+
+	echo '{"payload":{"header":{"channel_header":{"channel_id":"'$CHANNEL_NAME'", "type":2}},"data":{"config_update":'$(cat org3_update.json)'}}}' | jq . > org3_update_in_envelope.json
+
+14. convert to protobuf
+
+	configtxlator proto_encode --input org3_update_in_envelope.json --type common.Envelope --output org3_update_in_envelope.pb
+
+15. Org1 Signs the envelop
+
+	peer channel signconfigtx -f org3_update_in_envelope.pb
+
+16. Now as Org2
+
+	export CORE_PEER_LOCALMSPID=SBIMSP
+	export CORE_PEER_TLS_ENABLED=true
+	export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/sbi.example.com/users/Admin@sbi.example.com/msp
+	export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/sbi.example.com/peers/peer0.sbi.example.com/tls/ca.crt
+	export CORE_PEER_ADDRESS=localhost:9051
+
+17. Sign and update the envelop
+
+	peer channel update -f org3_update_in_envelope.pb -c $CHANNEL_NAME -o orderer.example.com:7050 --tls --cafile $ORDERER_CA
+
+18. Now Org3 peer to join the channel
+
+	export CORE_PEER_LOCALMSPID="AXISMSP"
+	export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/organizations/peerOrganizations/axis.example.com/peers/peer0.axis.example.com/tls/ca.crt
+	export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/organizations/peerOrganizations/axis.example.com/users/Admin@axis.example.com/msp
+	export CORE_PEER_ADDRESS=peer0.axis.example.com:11051
+	
+19. Get the application channel genesis block
+
+	peer channel fetch 0 mychannel.block -o orderer.example.com:7050 -c $CHANNEL_NAME --tls --cafile $ORDERER_CA
+
+20. Join the channel
+
+	peer channel join -b mychannel.block
+
+	peer channle list
+
+############################################ end #####################################################
+
+You can continue to deploy the chaincode and invoke the transactions after deploying it on all peers and orgs
